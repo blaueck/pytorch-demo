@@ -66,7 +66,7 @@ if __name__ == '__main__':
     parser.add_argument('--dataset', default='cifar10',
                         help='the eval dataset')
     parser.add_argument(
-        '--dataset_root', default='../test_adam/data/cifar-10-batches-bin/', help='dataset root')
+        '--dataset_root', default='data/cifar-10-batches-bin/', help='dataset root')
     
     parser.add_argument('--model', default='resnet_20',
                         choices=['resnet_20', 'simple_cnn'], help='model name')

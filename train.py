@@ -204,7 +204,7 @@ if __name__ == '__main__':
     parser.add_argument('--dataset', default='cifar10',
                         help='the training dataset')
     parser.add_argument(
-        '--dataset_root', default='../test_adam/data/cifar-10-batches-bin/', help='dataset root')
+        '--dataset_root', default='data/cifar-10-batches-bin/', help='dataset root')
     parser.add_argument(
         '--logdir', default='log/resnet_20', help='log directory')
     parser.add_argument('--restore', default='', help='snapshot path')
