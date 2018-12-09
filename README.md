@@ -1,6 +1,6 @@
 # Description
 A simple demo for using training cnn with pytorch. It is a
- clone of [tf-simple-example](https://github.com/blaueck/tf-simple-example).
+ pytorch clone of [tf-simple-example](https://github.com/blaueck/tf-simple-example). It support training cnn with mnist, cifar10, cifar100 and svhn.
 
 # Requirement
 * python==3.6
