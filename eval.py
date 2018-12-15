@@ -3,14 +3,18 @@ import os
 from pathlib import Path
 
 import torch
-import torch.utils.data
 
 import data_utils
 import models
-from metrics import MeanValue, Accuracy
+import metrics
+from train import step_fn
+from trainer import Trainer
+from callback import ConsoleLogger
 
 
 def main(args):
+
+    device = torch.device(args.device)
 
     # load data
     data, meta = data_utils.load_data(
@@ -18,13 +22,11 @@ def main(args):
 
     # build val dataloader
     dataset = data_utils.ImageDataset(*data, is_training=False)
-    dataloader = torch.utils.data.DataLoader(
-        dataset, args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
+    dataloader = data_utils.DeviceDataLoader(
+        device, dataset, args.batch_size, shuffle=False, num_workers=2)
 
     # remove temp dataset variables to reduce memory usage
     del data
-
-    device = torch.device(args.device)
 
     # build model
     if args.model == 'resnet_20':
@@ -33,31 +35,17 @@ def main(args):
         model = models.SimpleCNN
     net = model(dataset.shape, meta['n_class']).to(device=device)
 
-    criterion = torch.nn.CrossEntropyLoss()
+    trainer = Trainer(net, step_fn)
 
     state = torch.load(args.cpt)
-    net.load_state_dict(state['net'])
+    trainer.load_state_dict(state)
 
-    net.eval()
-    mean_loss, acc = MeanValue(), Accuracy()
-    for x, y in dataloader:
+    eval_metrics = [
+        metrics.Mean('loss'),
+        metrics.Accuracy()]
 
-        if device.type == 'cuda':
-            x = x.cuda(device, non_blocking=True)
-            y = y.cuda(device, non_blocking=True)
-
-        logits = net(x)
-        loss = criterion(logits, y)
-
-        loss = loss.detach().cpu().numpy()
-        predicts = torch.argmax(logits, dim=1).detach().cpu().numpy()
-        y = y.detach().cpu().numpy()
-
-        mean_loss.add(loss)
-        acc.add(predicts, y)
-
-    print('loss: {:.4f}, acc: {:.2%}'.format(
-        mean_loss.get(), acc.get()))
+    eval_cb = [ConsoleLogger()]
+    trainer.eval(dataloader, callbacks=eval_cb, metrics=eval_metrics)
 
 
 if __name__ == '__main__':

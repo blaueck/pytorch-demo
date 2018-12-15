@@ -35,14 +35,14 @@ def plot_dir(logdir, prefix):
         train_step.append(k)
         data = train_log[k]
         train_loss.append(data['loss'])
-        train_acc.append(data['acc'])
+        train_acc.append(data['accuracy'])
 
     val_step, val_loss, val_acc = [], [], []
     for k in sorted(val_log.keys()):
         val_step.append(k)
         data = val_log[k]
         val_loss.append(data['loss'])
-        val_acc.append(data['acc'])
+        val_acc.append(data['accuracy'])
     
     # plot logs
     plt.subplot(121)

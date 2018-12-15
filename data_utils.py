@@ -6,7 +6,7 @@ import numpy as np
 from scipy.io import loadmat
 
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 
 def _glob(pattern):
 
@@ -223,3 +223,24 @@ class ImageDataset(Dataset):
     def __getitem__(self, index):
         img, label = self._preprocess(self.images[index], self.labels[index])
         return img, label
+
+
+class DeviceDataLoader(DataLoader):
+
+    def __init__(self, device, *args, **kwargs):
+        pin_memory = False
+        if device.type == 'cuda':
+            pin_memory = True
+        kwargs['pin_memory'] = pin_memory
+
+        super(DeviceDataLoader, self).__init__(*args, **kwargs)
+        self.device = device
+    
+    def __iter__(self):
+        for xs in super(DeviceDataLoader, self).__iter__():
+            if self.device.type == 'cuda':
+                if isinstance(xs, tuple) or isinstance(xs, list):
+                    xs = (x.cuda(self.device, non_blocking=True) for x in xs)
+                else:
+                    xs = xs.cuda(self.device, non_blocking=True)
+            yield xs

@@ -5,28 +5,28 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.utils.data
+import torch.nn.functional as F
 
 import data_utils
 import models
-from metrics import TimeMeter, MeanValue, Accuracy
+from trainer import LRStrategy, Trainer
+from callback import ConsoleLogger, EpochCheckpointSaver, MetricCollector
+import metrics
 
 
-class LRManager:
+class LRManager(LRStrategy):
 
     def __init__(self, boundaries, values):
+        super(LRManager, self).__init__()
+
         self.boundaries = boundaries
         self.values = values
 
-    def get(self, epoch):
+    def get(self, epoch, global_step):
         for b, v in zip(self.boundaries, self.values):
             if epoch < b:
                 return v
         return self.values[-1]
-
-    def set_lr_for_optim(self, epoch, optim):
-        lr = self.get(epoch)
-        for group in optim.param_groups:
-            group['lr'] = lr
 
 
 def init_param(m):
@@ -58,11 +58,26 @@ def make_param_groups(net, weight_decay):
     return param_groups
 
 
+def step_fn(xs, model, training, trainer):
+    images, labels = xs
+    logits = model(images)
+    loss = F.cross_entropy(logits, labels)
+
+    trainer.update({
+        'loss': loss,
+        'logits': logits,
+        'labels': labels
+    })
+    return loss
+
+
 def main(args):
 
     # set random seed
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
+
+    device = torch.device(args.device)
 
     # load data
     data, meta = data_utils.load_data(
@@ -73,18 +88,16 @@ def main(args):
     # build train dataloader
     train_dataset = data_utils.ImageDataset(
         *train_data, is_training=True, is_flip=args.dataset not in ['mnist', 'svhn'])
-    train_dataloader = torch.utils.data.DataLoader(
-        train_dataset, args.batch_size, shuffle=True, num_workers=2, pin_memory=True)
+    train_dataloader = data_utils.DeviceDataLoader(
+        device, train_dataset, args.batch_size, shuffle=True, num_workers=2, pin_memory=True)
 
     # build val dataloader
     val_dataset = data_utils.ImageDataset(*val_data, is_training=False)
-    val_dataloader = torch.utils.data.DataLoader(
-        val_dataset, args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
+    val_dataloader = data_utils.DeviceDataLoader(
+        device, val_dataset, args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
 
     # remove temp dataset variables to reduce memory usage
     del data, train_data, val_data
-
-    device = torch.device(args.device)
 
     # build model
     if args.model == 'resnet_20':
@@ -94,109 +107,43 @@ def main(args):
     net = model(train_dataset.shape, meta['n_class']).to(device=device)
     net.apply(init_param)
 
-    criterion = torch.nn.CrossEntropyLoss()
-
     # build optim
     optim = torch.optim.SGD(make_param_groups(
         net, args.weight_decay), 0.1, momentum=0.9)
-
-    # make log directory
-    logdir = Path(args.logdir)
-    if not logdir.exists():
-        os.makedirs(str(logdir))
-
-    global_step = 0
-    start_epoch = 0
-    if args.restore:
-        # restore checkpoint
-        state = torch.load(args.restore)
-        start_epoch = state['epoch'] + 1
-        global_step = state['global_step']
-        net.load_state_dict(state['net'])
-        optim.load_state_dict(state['optim'])
 
     # lr strategy
     lr_boundaries = list(map(int, args.boundaries.split(',')))
     lr_values = list(map(float, args.values.split(',')))
     lr_manager = LRManager(lr_boundaries, lr_values)
 
-    for e in range(start_epoch, args.n_epoch):
-        print('-------epoch: {:d}-------'.format(e))
+    trainer = Trainer(net, step_fn, optim, lr_manager)
 
-        # training phrase
-        net.train()
-        mean_loss, acc = MeanValue(), Accuracy()
-        lr_manager.set_lr_for_optim(e, optim)
-        tm = TimeMeter()
-        tm.start()
-        train_log = {}
-        for i, (x, y) in enumerate(train_dataloader):
-            tm.add_counter()
+    train_collector = MetricCollector(args.log_every)
+    train_metrics = [
+        metrics.LR(),
+        metrics.Mean('loss', args.log_every),
+        metrics.Accuracy(args.log_every),
+        metrics.Speed(args.batch_size, args.log_every, use_cuda=device.type=='cuda')]
+    train_cb = [ConsoleLogger(args.log_every),
+                EpochCheckpointSaver(args.logdir),
+                train_collector]
 
-            if device.type == 'cuda':
-                x = x.cuda(device, non_blocking=True)
-                y = y.cuda(device, non_blocking=True)
+    val_collector = MetricCollector()
+    val_metrics = [
+        metrics.Mean('loss'),
+        metrics.Accuracy(),
+        metrics.Speed(args.batch_size)]
+    val_cb = [ConsoleLogger(), val_collector]
 
-            optim.zero_grad()
-            logits = net(x)
-            loss = criterion(logits, y)
+    if args.restore:
+        state = torch.load(args.restore)
+        trainer.load_state_dict(state)
 
-            loss.backward()
-            optim.step()
-            global_step += 1
-
-            loss = loss.detach().cpu().numpy()
-            predicts = torch.argmax(logits, dim=1).detach().cpu().numpy()
-            y = y.detach().cpu().numpy()
-
-            mean_loss.add(loss)
-            acc.add(predicts, y)
-
-            if i % args.log_every == 0:
-                torch.cuda.synchronize()
-                tm.stop()
-
-                print('step: {:d}, lr: {:g}, loss: {:.4f}, acc: {:.2%}, speed: {:.2f} i/s.'
-                      .format(i, lr_manager.get(e), mean_loss.get(), acc.get(), args.batch_size / tm.get()))
-                train_log[global_step] = {
-                    'loss': mean_loss.get(), 'acc': acc.get()}
-                tm.reset()
-                tm.start()
-                mean_loss.reset()
-                acc.reset()
-
-        # val phrase
-        net.eval()
-        mean_loss, acc = MeanValue(), Accuracy()
-        for x, y in val_dataloader:
-
-            if device.type == 'cuda':
-                x = x.cuda(device, non_blocking=True)
-                y = y.cuda(device, non_blocking=True)
-
-            logits = net(x)
-            loss = criterion(logits, y)
-
-            loss = loss.detach().cpu().numpy()
-            predicts = torch.argmax(logits, dim=1).detach().cpu().numpy()
-            y = y.detach().cpu().numpy()
-
-            mean_loss.add(loss)
-            acc.add(predicts, y)
-
-        print('val_loss: {:.4f}, val_acc: {:.2%}'.format(
-            mean_loss.get(), acc.get()))
-        val_log = {global_step: {'loss': mean_loss.get(), 'acc': acc.get()}}
-
-        # save checkpoint
-        vars_to_saver = {
-            'net': net.state_dict(), 'optim': optim.state_dict(),
-            'epoch': e, 'global_step': global_step}
-        cpt_file = logdir / 'checkpoint_{:d}.pk'.format(e)
-        torch.save(vars_to_saver, str(cpt_file))
-
-        log_file = logdir / 'log_{:d}.pk'.format(e)
-        torch.save({'train': train_log, 'val': val_log}, str(log_file))
+    for e in range(trainer.epoch, args.n_epoch):
+        trainer.fit(train_dataloader, n_step=200, callbacks=train_cb, metrics=train_metrics)
+        trainer.eval(val_dataloader, callbacks=val_cb, metrics=val_metrics)
+        torch.save({'train': train_collector.state_dict(), 'val': val_collector.state_dict()},
+                    os.path.join(args.logdir, 'log_{:d}.pk'.format(e)))
 
 
 if __name__ == '__main__':
@@ -204,7 +151,7 @@ if __name__ == '__main__':
     parser.add_argument('--dataset', default='cifar10',
                         help='the training dataset')
     parser.add_argument(
-        '--dataset_root', default='data/cifar-10-batches-bin/', help='dataset root')
+        '--dataset_root', default='../test_adam/data/cifar-10-batches-bin/', help='dataset root')
     parser.add_argument(
         '--logdir', default='log/resnet_20', help='log directory')
     parser.add_argument('--restore', default='', help='snapshot path')
